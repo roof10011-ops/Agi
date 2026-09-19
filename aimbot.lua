@@ -64,6 +64,8 @@ local State = {
     IgnoreTeammates   = true,
     IgnoreDead        = true,
     AimNearest        = false,
+    StickyBreak       = 120,   -- total touch px to break lock
+    BreakCooldown     = 0.40,  -- seconds locked out after break
 
     -- ESP
     ESPEnabled        = false,
@@ -216,6 +218,35 @@ local function getTargetPoint(plr)
 end
 
 --============================================================
+-- STICKY ESCAPE STATE
+--============================================================
+local currentAimTarget = nil
+local swipeAccum      = 0
+local swipeLastAt     = 0
+local escapedUntil    = 0
+
+-- rolling swipe accumulator
+UserInputService.InputChanged:Connect(function(input)
+    if input.UserInputType ~= Enum.UserInputType.Touch then return end
+    -- ignore touches that belong to other gui (trigger button not present here, but safe)
+    local d = input.Delta
+    local mag = math.sqrt(d.X * d.X + d.Y * d.Y)
+    local now = tick()
+    if now - swipeLastAt > 0.12 then
+        swipeAccum = mag
+    else
+        swipeAccum = swipeAccum + mag
+    end
+    swipeLastAt = now
+
+    if swipeAccum >= State.StickyBreak and now >= escapedUntil then
+        escapedUntil   = now + State.BreakCooldown
+        swipeAccum     = 0
+        currentAimTarget = nil
+    end
+end)
+
+--============================================================
 -- TARGET ACQUISITION
 --============================================================
 local function getBestTarget()
@@ -258,11 +289,11 @@ local function getBestTarget()
 end
 
 --============================================================
--- AIMBOT LOOP
+-- AIMBOT LOOP (bound AFTER the game's camera script)
 --============================================================
-local currentAimTarget = nil
+local AIM_BIND = "AGI_AimbotCamera"
 
-RunService.RenderStepped:Connect(function(dt)
+local function aimUpdate(dt)
     if FOVCircle then
         local center = getScreenCenter()
         FOVCircle.Position = center
@@ -276,6 +307,11 @@ RunService.RenderStepped:Connect(function(dt)
         return
     end
 
+    -- sticky escape: he broke free with a hard swipe
+    if tick() < escapedUntil then
+        return
+    end
+
     if currentAimTarget and not isValidTarget(currentAimTarget) then
         currentAimTarget = nil
     end
@@ -283,8 +319,11 @@ RunService.RenderStepped:Connect(function(dt)
         currentAimTarget = nil
     end
 
-    local target = getBestTarget()
-    if target then currentAimTarget = target end
+    -- only re-acquire if we don't already hold a target (sticky)
+    if not currentAimTarget then
+        local target = getBestTarget()
+        if target then currentAimTarget = target end
+    end
 
     if currentAimTarget then
         local worldPos = getTargetPoint(currentAimTarget)
@@ -293,9 +332,27 @@ RunService.RenderStepped:Connect(function(dt)
             local desired = CFrame.new(camPos, worldPos)
             local alpha = math.clamp(State.AimMagnetism, 0, 1)
             Camera.CFrame = Camera.CFrame:Lerp(desired, alpha)
+
+            local char = LocalPlayer.Character
+            if char then
+                local hrp = char:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local flatLook = Vector3.new(worldPos.X - hrp.Position.X, 0, worldPos.Z - hrp.Position.Z)
+                    if flatLook.Magnitude > 0.1 then
+                        local targetCF = CFrame.lookAt(hrp.Position, hrp.Position + flatLook.Unit)
+                        hrp.CFrame = hrp.CFrame:Lerp(
+                            CFrame.new(hrp.Position) * (targetCF - targetCF.Position),
+                            alpha
+                        )
+                    end
+                end
+            end
         end
     end
-end)
+end
+
+pcall(function() RunService:UnbindFromRenderStep(AIM_BIND) end)
+RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, aimUpdate)
 
 --============================================================
 -- ESP RENDERING
@@ -537,6 +594,26 @@ AimTab:CreateSlider({
     CurrentValue = 35,
     Flag = "AimMagnetism",
     Callback = function(v) State.AimMagnetism = v / 100 end,
+})
+
+AimTab:CreateSlider({
+    Name = "Sticky Break Force",
+    Range = {20, 800},
+    Increment = 5,
+    Suffix = "px",
+    CurrentValue = 120,
+    Flag = "StickyBreak",
+    Callback = function(v) State.StickyBreak = v end,
+})
+
+AimTab:CreateSlider({
+    Name = "Re-Lock Delay",
+    Range = {0, 2000},
+    Increment = 10,
+    Suffix = "ms",
+    CurrentValue = 400,
+    Flag = "BreakCooldown",
+    Callback = function(v) State.BreakCooldown = v / 1000 end,
 })
 
 AimTab:CreateSlider({
